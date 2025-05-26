@@ -1,0 +1,81 @@
+import logging from aiogram import Bot, Dispatcher, executor, types from aiogram.contrib.fsm_storage.memory import MemoryStorage from aiogram.dispatcher import FSMContext from aiogram.dispatcher.filters.state import State, StatesGroup from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+from oxforddic import getDefinitions from googletrans import Translator
+
+translator = Translator()
+
+API_TOKEN = 'YOUR_TOKEN_HERE' logging.basicConfig(level=logging.INFO) storage = MemoryStorage() bot = Bot(token=API_TOKEN) dp = Dispatcher(bot, storage=storage)
+
+AVAILABLE_LANGUAGES = { "en": "🇬🇧 English", "uz": "🇺🇿 O'zbekcha", "ru": "🇷🇺 Русский" } DEFAULT_PRIMARY_LANG = "en" DEFAULT_TARGET_LANG = "uz"
+
+user_languages = {}  # сохраняем выбор вне state
+
+class LanguageSetup(StatesGroup): choosing_primary_lang = State() choosing_target_lang = State()
+
+def create_language_keyboard(exclude_lang_code: str = None): keyboard = InlineKeyboardMarkup(row_width=2) for code, name in AVAILABLE_LANGUAGES.items(): if code != exclude_lang_code: keyboard.add(InlineKeyboardButton(name, callback_data=f"lang_{code}")) return keyboard
+
+@dp.message_handler(commands=['start'], state="*") async def cmd_start(message: types.Message, state: FSMContext): await state.finish() await message.reply( "Asosiy tilni tanlang (siz yozadigan til):", reply_markup=create_language_keyboard() ) await LanguageSetup.choosing_primary_lang.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('lang_'), state=LanguageSetup.choosing_primary_lang) async def set_primary_lang(callback_query: types.CallbackQuery, state: FSMContext): lang_code = callback_query.data.split('_')[1] user_id = callback_query.from_user.id user_languages[user_id] = {'primary': lang_code}
+
+await bot.answer_callback_query(callback_query.id)
+await bot.send_message(user_id, f"Asosiy til tanlandi: {AVAILABLE_LANGUAGES[lang_code]}\nEndi tarjima tilini tanlang:",
+                       reply_markup=create_language_keyboard(exclude_lang_code=lang_code))
+await LanguageSetup.choosing_target_lang.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('lang_'), state=LanguageSetup.choosing_target_lang) async def set_target_lang(callback_query: types.CallbackQuery, state: FSMContext): lang_code = callback_query.data.split('_')[1] user_id = callback_query.from_user.id user_languages[user_id]['target'] = lang_code
+
+await bot.answer_callback_query(callback_query.id)
+await bot.send_message(user_id,
+    f"Tarjima sozlandi:\nYozish tili: {AVAILABLE_LANGUAGES[user_languages[user_id]['primary']]}\n"
+    f"Tarjima tili: {AVAILABLE_LANGUAGES[lang_code]}\nEndi so'z yoki matn yuboring.")
+await state.finish()
+
+@dp.message_handler(commands=['help']) async def cmd_help(message: types.Message): await message.reply("So'z yuboring: tarjima, ma'no, sinonimlar va talaffuzni olasiz.\nMatn yuborsangiz, faqat tarjima qilinadi.")
+
+@dp.message_handler(content_types=types.ContentTypes.TEXT) async def process_text(message: types.Message): user_id = message.from_user.id user_text = message.text.strip() if not user_text: return await message.reply("Iltimos, matn yuboring.")
+
+langs = user_languages.get(user_id, {})
+src = langs.get('primary', DEFAULT_PRIMARY_LANG)
+dest = langs.get('target', DEFAULT_TARGET_LANG)
+
+is_single_word = ' ' not in user_text.strip()
+
+try:
+    translated = translator.translate(user_text[:4000], src=src, dest=dest)
+except Exception as e:
+    logging.error(f"Translation error: {e}")
+    return await message.reply("Tarjimada xatolik yuz berdi.")
+
+if not is_single_word:
+    return await message.reply(f"Tarjima ({src} → {dest}):\n{translated.text}")
+
+parts = [
+    f"📖 So'z: {user_text}",
+    f"🔄 Tarjima: {translated.text}"
+]
+
+try:
+    if src != 'en':
+        lookup_word = translator.translate(user_text, src=src, dest='en').text
+    else:
+        lookup_word = user_text
+
+    if ' ' not in lookup_word:
+        data = getDefinitions(lookup_word)
+        if data:
+            if 'definitions' in data:
+                parts.append(f"\n📚 Ma'nolar:\n{data['definitions']}")
+            if 'synonyms' in data:
+                parts.append(f"\n🤝 Sinonimlar:\n{data['synonyms']}")
+            if 'audio' in data:
+                await message.reply_voice(data['audio'], caption=f"🎤 Talaffuzi: {lookup_word}")
+        else:
+            parts.append("\nQo'shimcha ma'lumot topilmadi.")
+except Exception as e:
+    logging.error(f"Definition error: {e}")
+
+await message.reply("\n".join(parts))
+
+if name == 'main': logging.info("Bot ishga tushmoqda...") executor.start_polling(dp, skip_updates=True)
+
